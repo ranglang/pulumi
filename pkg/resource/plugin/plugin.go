@@ -144,7 +144,10 @@ func newPlugin(ctx *Context, bin string, prefix string, args []string) (*plugin,
 
 	// Now that we have a process, we expect it to write a single line to STDOUT: the port it's listening on.  We only
 	// read a byte at a time so that STDOUT contains everything after the first newline.
+	debugOn := strings.Contains(bin, "pulumi-resource-kubernetes")
 	var port string
+	var s string
+	seekDone := false
 	b := make([]byte, 1)
 	for {
 		n, readerr := plug.Stdout.Read(b)
@@ -156,11 +159,22 @@ func newPlugin(ctx *Context, bin string, prefix string, args []string) (*plugin,
 			}
 			return nil, errors.Wrapf(readerr, "failure reading plugin [%v] stdout (read '%v')", bin, port)
 		}
+		if debugOn && !seekDone {
+			s += string(b[:n])
+			if b[0] == '\n' {
+				logging.V(3).Infof("Newline found. Full string: %s", s)
+				s = ""
+				seekDone = true
+			}
+
+			continue
+		}
 		if n > 0 && b[0] == '\n' {
 			break
 		}
 		port += string(b[:n])
 	}
+	port = strings.TrimSuffix(port, "\r")
 
 	// Parse the output line (minus the '\n') to ensure it's a numeric port.
 	if _, err = strconv.Atoi(port); err != nil {
@@ -247,7 +261,19 @@ func execPlugin(bin string, pluginArgs []string, pwd string) (*plugin, error) {
 	}
 	args = append(args, pluginArgs...)
 
-	cmd := exec.Command(bin, args...)
+	var cmd *exec.Cmd
+	if strings.Contains(bin, "pulumi-resource-kubernetes") {
+		debuggerString := fmt.Sprintf("--listen=:2345 --headless=true --api-version=2 exec %s", bin)
+		debuggerArgs := strings.Split(debuggerString, " ")
+		if len(args) > 0 {
+			debuggerArgs = append(debuggerArgs, "--")
+			debuggerArgs = append(debuggerArgs, args...)
+		}
+		cmd = exec.Command("dlv", debuggerArgs...)
+	} else {
+		cmd = exec.Command(bin, args...)
+	}
+
 	cmdutil.RegisterProcessGroup(cmd)
 	cmd.Dir = pwd
 	in, _ := cmd.StdinPipe()
